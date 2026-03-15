@@ -22,10 +22,10 @@ from selenium.common.exceptions import (
 from selenium.webdriver.support.ui import WebDriverWait
 
 # ---------------- CONFIG (via env)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-PHONE = os.getenv("PHONE", "")
-PASSWORD = os.getenv("PASSWORD", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8742776802:AAHSzD1qTwCqMEOdoW9_pT2l5GfmMBWUZQY")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7427648935")
+PHONE = os.getenv("PHONE", "857789345")
+PASSWORD = os.getenv("PASSWORD", "2010")
 URL = os.getenv("URL", "https://ebet.co.mz/games/go/spribe?id=aviator")
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("1", "true", "yes")
 PORT = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
