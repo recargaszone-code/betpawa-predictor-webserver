@@ -26,7 +26,8 @@ PIN = "2010"
 URL = "https://www.betpawa.co.mz/games?gameId=aviator&filter=all&redirectBack=/games"
 # ===================================================
 
-historico = []
+historico = []          # snapshot atual da página (para detectar mudança)
+global_history = []     # ← NOVO: acumula até 50 (últimos 50)
 _last_telegram = 0
 
 
@@ -119,14 +120,14 @@ def page_shows_rate_limit(driver):
 
 
 def iniciar_scraper():
-    global historico
+    global historico, global_history
     backoff = 8
     max_backoff = 600
 
     while True:
         driver = None
         try:
-            send_telegram_text("🟢 Iniciando BETPAWA Aviator (modo humano 10s)...")
+            send_telegram_text("🟢 Iniciando BETPAWA Aviator (modo humano 10s + histórico 50)...")
             time.sleep(10)
 
             opts = Options()
@@ -150,37 +151,37 @@ def iniciar_scraper():
             time.sleep(10)
             screenshot_and_send(driver, "1 - Página inicial aberta")
 
-            # PASSO 2 - CLICAR LOGIN MODAL
-            send_telegram_text("📍 Passo 2: Clicando botão Login (data-test-id)")
+            # PASSO 2
+            send_telegram_text("📍 Passo 2: Clicando botão Login")
             try:
                 login_btn = wait.until(EC.element_to_be_clickable(
                     (By.XPATH, "//button[@data-test-id='confirmation-modal-secondary-button' and contains(.,'Login')]")))
                 safe_click(driver, login_btn)
                 send_telegram_text("✅ Botão Login clicado")
             except:
-                send_telegram_text("⚠️ Modal já aberto ou não encontrado")
+                send_telegram_text("⚠️ Modal já aberto")
             time.sleep(10)
-            screenshot_and_send(driver, "2 - Após clicar Login modal")
+            screenshot_and_send(driver, "2 - Após Login modal")
 
-            # PASSO 3 - TELEFONE
-            send_telegram_text("📍 Passo 3: Preenchendo telefone 857789345")
+            # PASSO 3
+            send_telegram_text("📍 Passo 3: Preenchendo telefone")
             phone = wait.until(EC.presence_of_element_located((By.ID, "phoneNumber")))
             js_set_value_and_dispatch(driver, phone, PHONE)
             send_telegram_text("✅ Telefone preenchido")
             time.sleep(10)
-            screenshot_and_send(driver, "3 - Telefone preenchido")
+            screenshot_and_send(driver, "3 - Telefone OK")
 
-            # PASSO 4 - PIN
-            send_telegram_text("📍 Passo 4: Preenchendo PIN 2010")
+            # PASSO 4
+            send_telegram_text("📍 Passo 4: Preenchendo PIN")
             pin = wait.until(EC.presence_of_element_located(
                 (By.CSS_SELECTOR, "input[data-test-id='loginFormPasswordInput'], input[type='password']")))
             js_set_value_and_dispatch(driver, pin, PIN)
             send_telegram_text("✅ PIN preenchido")
             time.sleep(10)
-            screenshot_and_send(driver, "4 - PIN preenchido")
+            screenshot_and_send(driver, "4 - PIN OK")
 
-            # PASSO 5 - CLICAR LOG IN
-            send_telegram_text("📍 Passo 5: Clicando botão Log In")
+            # PASSO 5
+            send_telegram_text("📍 Passo 5: Clicando Log In")
             submit = driver.find_element(By.CSS_SELECTOR, "button[data-test-id='logInButton']")
             if submit.get_attribute("disabled"):
                 driver.execute_script("arguments[0].removeAttribute('disabled');", submit)
@@ -189,8 +190,8 @@ def iniciar_scraper():
             time.sleep(10)
             screenshot_and_send(driver, "5 - Login enviado")
 
-            # PASSO 6 - AGUARDAR IFRAME
-            send_telegram_text("📍 Passo 6: Aguardando iframe Spribe...")
+            # PASSO 6
+            send_telegram_text("📍 Passo 6: Aguardando iframe")
             iframe_el = None
             start = time.time()
             while time.time() - start < 40:
@@ -199,19 +200,18 @@ def iniciar_scraper():
                     if "launch.spribegaming.com" in src or "aviator-next.spribegaming.com" in src:
                         iframe_el = f
                         break
-                if iframe_el:
-                    break
+                if iframe_el: break
                 time.sleep(2)
             if iframe_el:
                 driver.switch_to.frame(iframe_el)
-                send_telegram_text("✅ Entrou no iframe Spribe")
+                send_telegram_text("✅ Dentro do iframe")
             else:
                 raise RuntimeError("iframe não encontrado")
             time.sleep(10)
-            screenshot_and_send(driver, "6 - Dentro do iframe Aviator")
+            screenshot_and_send(driver, "6 - Dentro do Aviator")
 
-            # PASSO 7 - AGUARDAR HISTÓRICO
-            send_telegram_text("📍 Passo 7: Aguardando histórico aparecer...")
+            # PASSO 7 - Histórico inicial
+            send_telegram_text("📍 Passo 7: Capturando histórico inicial")
             start = time.time()
             while time.time() - start < 40:
                 if page_shows_rate_limit(driver):
@@ -222,12 +222,13 @@ def iniciar_scraper():
                 vals = coletar_historico_dom(driver)
                 if vals:
                     historico = vals
-                    send_telegram_text("✅ Histórico inicial capturado!")
+                    global_history = vals[:]          # ← inicia o acumulador
+                    send_telegram_text("✅ Histórico inicial carregado (50)")
                     break
                 time.sleep(5)
             time.sleep(10)
 
-            # ================= LOOP DE MONITORAMENTO (a cada 10s) =================
+            # ================= LOOP PRINCIPAL (a cada 10s) =================
             while True:
                 if page_shows_rate_limit(driver):
                     sleep_time = min(max_backoff, backoff) + random.uniform(0, 3)
@@ -235,22 +236,30 @@ def iniciar_scraper():
                     time.sleep(sleep_time)
                     continue
 
-                try:
-                    novos = coletar_historico_dom(driver)
-                    if novos and novos != historico:
-                        historico = novos
-                        lista = ", ".join(f"{v:.2f}x" for v in historico[:25])
-                        send_telegram_text(f"📊 **BETPAWA AVIATOR**\n\n[{lista}]\n\nÚltimo: *{historico[0]:.2f}x*")
+                novos = coletar_historico_dom(driver)
+
+                # DETECTA NOVO VALOR E ATUALIZA ACUMULADOR DE 50
+                if novos and (not historico or novos[0] != historico[0]):
+                    added = False
+                    for v in novos:
+                        if v not in global_history:
+                            global_history.insert(0, v)   # novo no topo
+                            added = True
+                    if len(global_history) > 50:
+                        global_history = global_history[:50]   # elimina o mais antigo
+
+                    if added:
+                        lista = ", ".join(f"{v:.2f}x" for v in global_history[:25])
+                        send_telegram_text(
+                            f"📊 **BETPAWA AVIATOR - ÚLTIMOS 50**\n\n[{lista}]\n\nÚltimo: *{global_history[0]:.2f}x*"
+                        )
                         if random.random() < 0.6:
-                            screenshot_and_send(driver, "Histórico atualizado")
-                except StaleElementReferenceException:
-                    send_telegram_text("🔄 Stale Element — recuperando iframe")
-                    time.sleep(5)
-                except Exception as e:
-                    raise e
+                            screenshot_and_send(driver, f"Histórico atualizado ({len(global_history)}/50)")
+
+                    historico = novos[:]   # atualiza snapshot
 
                 send_telegram_text("⏱️ Aguardando 10s para próxima verificação...")
-                time.sleep(10)   # ← exatamente 10 segundos
+                time.sleep(10)
 
         except Exception as e:
             sleep_time = min(max_backoff, backoff) + random.uniform(1, 4)
@@ -269,17 +278,17 @@ def iniciar_scraper():
 
 @app.route("/api/history")
 def api_history():
-    return jsonify(historico)
+    return jsonify(global_history)   # ← agora retorna os últimos 50 acumulados
 
 
 @app.route("/api/last")
 def api_last():
-    return jsonify(historico[0] if historico else None)
+    return jsonify(global_history[0] if global_history else None)
 
 
 @app.route("/")
 def home():
-    return "BETPAWA AVIATOR - Processo humano 10s + prints em cada passo"
+    return "BETPAWA AVIATOR - Histórico acumulado até 50 (remove o mais antigo)"
 
 
 if __name__ == "__main__":
