@@ -1,11 +1,9 @@
 FROM python:3.10-slim
 
-# instalar dependências do sistema para Chromium
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
     wget \
-    ca-certificates \
     curl \
     unzip \
     gnupg2 \
@@ -17,19 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libxdamage1 \
     libxrandr2 \
-    libx11-6 \
-    libgtk-3-0 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
 COPY . .
-
-RUN python -m pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-ENV HEADLESS=true
-
 CMD ["python", "main.py"]
