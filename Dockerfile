@@ -1,7 +1,6 @@
-# Dockerfile
 FROM python:3.10-slim
 
-# instalar dependências do sistema para Chromium + libs comuns
+# instalar dependências do sistema para Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
@@ -24,17 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# copia código e requirements
 COPY . .
 
-# instalar dependências python
 RUN python -m pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# variáveis de ambiente padrão (podem ser sobrescritas no Railway)
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV HEADLESS=true
 
-# comando de execução
 CMD ["python", "main.py"]
