@@ -15,7 +15,7 @@ from selenium.webdriver.support import expected_conditions as EC
 PHONE = "857789345"
 PIN = "2010"
 
-BASE_URL = "https://www.betpawa.co.mz/games"
+BASE_URL = "https://www.betpawa.co.mz/games?gameId=aviator&filter=all&redirectBack=/games"
 
 # =====================================================
 
