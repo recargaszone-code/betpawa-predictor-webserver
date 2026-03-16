@@ -1,3 +1,4 @@
+# main.py (versão corrigida para evitar spam Telegram)
 import os
 import time
 import threading
@@ -18,50 +19,66 @@ from selenium.common.exceptions import (
 
 app = Flask(__name__)
 
-# ================= CONFIG HARDCODED =================
+# ================= CONFIG HARDCODED (ambiente de teste) =================
 TELEGRAM_TOKEN = "8742776802:AAHSzD1qTwCqMEOdoW9_pT2l5GfmMBWUZQY"
 TELEGRAM_CHAT_ID = "7427648935"
 PHONE = "857789345"
 PIN = "2010"
 URL = "https://www.betpawa.co.mz/games?gameId=aviator&filter=all&redirectBack=/games"
-# ===================================================
+# ======================================================================
 
 historico = []          # snapshot atual da página (para detectar mudança)
-global_history = []     # ← NOVO: acumula até 50 (últimos 50)
+global_history = []     # acumula até 50 (últimos 50)
 _last_telegram = 0
 
 
-def send_telegram_text(msg):
+def send_telegram_text(msg, throttle_seconds=6):
+    """
+    Envia texto ao Telegram com throttle customizável por chamada.
+    throttle_seconds=0 => sem throttle (tentar enviar imediatamente).
+    """
     global _last_telegram
-    if time.time() - _last_telegram < 3:
-        return
+    now = time.time()
+    if throttle_seconds and (now - _last_telegram) < throttle_seconds:
+        # não envia (throttled)
+        return False
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        _last_telegram = time.time()
-    except:
-        pass
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        _last_telegram = now
+        return True
+    except Exception:
+        return False
 
 
-def send_telegram_photo(path, caption=""):
+def send_telegram_photo(path, caption="", throttle_seconds=30):
     global _last_telegram
-    if time.time() - _last_telegram < 20:
-        return
+    now = time.time()
+    if (now - _last_telegram) < throttle_seconds:
+        return False
     try:
         with open(path, "rb") as f:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                          files={"photo": f}, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, timeout=30)
-        _last_telegram = time.time()
-    except:
-        pass
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                files={"photo": f},
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                timeout=30,
+            )
+        _last_telegram = now
+        return True
+    except Exception:
+        return False
 
 
 def screenshot_and_send(driver, label):
     try:
         path = "/tmp/print.png"
         driver.save_screenshot(path)
-        send_telegram_photo(path, caption=f"📍 {label}")
-    except:
+        send_telegram_photo(path, caption=f"📍 {label}", throttle_seconds=30)
+    except Exception:
         pass
 
 
@@ -70,11 +87,11 @@ def safe_click(driver, element):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
         element.click()
         return True
-    except:
+    except Exception:
         try:
             driver.execute_script("arguments[0].click();", element)
             return True
-        except:
+        except Exception:
             return False
 
 
@@ -90,7 +107,7 @@ def js_set_value_and_dispatch(driver, element, value):
             return true;
         """, element, value)
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -105,9 +122,9 @@ def coletar_historico_dom(driver):
                 m = pat.search(txt)
                 if m:
                     out.append(float(m.group(1)))
-            except:
+            except Exception:
                 continue
-    except:
+    except Exception:
         pass
     return out
 
@@ -115,7 +132,7 @@ def coletar_historico_dom(driver):
 def page_shows_rate_limit(driver):
     try:
         return any(token in driver.page_source.lower() for token in ["rate limit", "too many requests", "429"])
-    except:
+    except Exception:
         return False
 
 
@@ -123,14 +140,17 @@ def iniciar_scraper():
     global historico, global_history
     backoff = 8
     max_backoff = 600
+    last_heartbeat = 0
+    HEARTBEAT_INTERVAL = 30 * 60  # 30 minutos (apenas se quiser heartbeat)
 
     while True:
         driver = None
         try:
-            send_telegram_text("🟢 Iniciando BETPAWA Aviator (modo humano 10s + histórico 50)...")
-            time.sleep(10)
+            send_telegram_text("🟢 Iniciando BETPAWA Aviator (modo protegido)", throttle_seconds=0)
+            time.sleep(5 + random.uniform(0, 5))
 
             opts = Options()
+            # Usa headless se a variável de ambiente pedir (ou sempre no container)
             opts.add_argument("--headless=new")
             opts.add_argument("--no-sandbox")
             opts.add_argument("--disable-dev-shm-usage")
@@ -146,124 +166,146 @@ def iniciar_scraper():
             wait = WebDriverWait(driver, 30)
 
             # PASSO 1
-            send_telegram_text("📍 Passo 1: Abrindo URL")
+            send_telegram_text("📍 Abrindo URL do Betpawa", throttle_seconds=0)
             driver.get(URL)
-            time.sleep(10)
+            time.sleep(6)
             screenshot_and_send(driver, "1 - Página inicial aberta")
 
-            # PASSO 2
-            send_telegram_text("📍 Passo 2: Clicando botão Login")
+            # PASSO 2 - login modal
             try:
                 login_btn = wait.until(EC.element_to_be_clickable(
                     (By.XPATH, "//button[@data-test-id='confirmation-modal-secondary-button' and contains(.,'Login')]")))
                 safe_click(driver, login_btn)
-                send_telegram_text("✅ Botão Login clicado")
-            except:
-                send_telegram_text("⚠️ Modal já aberto")
-            time.sleep(10)
+                send_telegram_text("✅ Modal de Login aberto", throttle_seconds=0)
+            except Exception:
+                # modal pode já estar aberto — não enviar spam
+                pass
+            time.sleep(4)
             screenshot_and_send(driver, "2 - Após Login modal")
 
-            # PASSO 3
-            send_telegram_text("📍 Passo 3: Preenchendo telefone")
-            phone = wait.until(EC.presence_of_element_located((By.ID, "phoneNumber")))
-            js_set_value_and_dispatch(driver, phone, PHONE)
-            send_telegram_text("✅ Telefone preenchido")
-            time.sleep(10)
+            # PASSO 3 - telefone
+            try:
+                phone = wait.until(EC.presence_of_element_located((By.ID, "phoneNumber")))
+                js_set_value_and_dispatch(driver, phone, PHONE)
+                send_telegram_text("✅ Telefone preenchido", throttle_seconds=0)
+            except Exception:
+                send_telegram_text("⚠️ Falha ao localizar/preencher telefone", throttle_seconds=0)
+            time.sleep(4)
             screenshot_and_send(driver, "3 - Telefone OK")
 
-            # PASSO 4
-            send_telegram_text("📍 Passo 4: Preenchendo PIN")
-            pin = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "input[data-test-id='loginFormPasswordInput'], input[type='password']")))
-            js_set_value_and_dispatch(driver, pin, PIN)
-            send_telegram_text("✅ PIN preenchido")
-            time.sleep(10)
+            # PASSO 4 - pin
+            try:
+                pin = wait.until(EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "input[data-test-id='loginFormPasswordInput'], input[type='password']")))
+                js_set_value_and_dispatch(driver, pin, PIN)
+                send_telegram_text("✅ PIN preenchido", throttle_seconds=0)
+            except Exception:
+                send_telegram_text("⚠️ Falha ao localizar/preencher PIN", throttle_seconds=0)
+            time.sleep(4)
             screenshot_and_send(driver, "4 - PIN OK")
 
-            # PASSO 5
-            send_telegram_text("📍 Passo 5: Clicando Log In")
-            submit = driver.find_element(By.CSS_SELECTOR, "button[data-test-id='logInButton']")
-            if submit.get_attribute("disabled"):
-                driver.execute_script("arguments[0].removeAttribute('disabled');", submit)
-            safe_click(driver, submit)
-            send_telegram_text("✅ Log In enviado")
-            time.sleep(10)
+            # PASSO 5 - submit login
+            try:
+                submit = driver.find_element(By.CSS_SELECTOR, "button[data-test-id='logInButton']")
+                if submit.get_attribute("disabled"):
+                    driver.execute_script("arguments[0].removeAttribute('disabled');", submit)
+                safe_click(driver, submit)
+                send_telegram_text("✅ Login enviado", throttle_seconds=0)
+            except Exception:
+                send_telegram_text("⚠️ Falha ao enviar Login (submit não encontrado)", throttle_seconds=0)
+            time.sleep(6)
             screenshot_and_send(driver, "5 - Login enviado")
 
-            # PASSO 6
-            send_telegram_text("📍 Passo 6: Aguardando iframe")
+            # PASSO 6 - localizar iframe do jogo
             iframe_el = None
             start = time.time()
             while time.time() - start < 40:
-                for f in driver.find_elements(By.TAG_NAME, "iframe"):
-                    src = (f.get_attribute("src") or "").lower()
-                    if "launch.spribegaming.com" in src or "aviator-next.spribegaming.com" in src:
-                        iframe_el = f
+                try:
+                    for f in driver.find_elements(By.TAG_NAME, "iframe"):
+                        src = (f.get_attribute("src") or "").lower()
+                        if "launch.spribegaming.com" in src or "aviator-next.spribegaming.com" in src or "spribegaming" in src:
+                            iframe_el = f
+                            break
+                    if iframe_el:
                         break
-                if iframe_el: break
-                time.sleep(2)
-            if iframe_el:
-                driver.switch_to.frame(iframe_el)
-                send_telegram_text("✅ Dentro do iframe")
-            else:
-                raise RuntimeError("iframe não encontrado")
-            time.sleep(10)
+                except Exception:
+                    pass
+                time.sleep(1)
+            if not iframe_el:
+                raise RuntimeError("iframe do jogo não encontrado")
+            driver.switch_to.frame(iframe_el)
+            send_telegram_text("✅ Dentro do iframe do Aviator", throttle_seconds=0)
+            time.sleep(4)
             screenshot_and_send(driver, "6 - Dentro do Aviator")
 
-            # PASSO 7 - Histórico inicial
-            send_telegram_text("📍 Passo 7: Capturando histórico inicial")
+            # PASSO 7 - histórico inicial
             start = time.time()
+            found = False
             while time.time() - start < 40:
                 if page_shows_rate_limit(driver):
                     sleep_time = min(max_backoff, backoff) + random.uniform(0, 3)
-                    send_telegram_text(f"Rate limit detectado no loop — dormindo {int(sleep_time)}s")
+                    send_telegram_text(f"⚠️ Rate limit detectado — dormindo {int(sleep_time)}s", throttle_seconds=0)
                     time.sleep(sleep_time)
                     continue
                 vals = coletar_historico_dom(driver)
                 if vals:
-                    historico = vals
-                    global_history = vals[:]          # ← inicia o acumulador
-                    send_telegram_text("✅ Histórico inicial carregado (50)")
+                    historico = vals[:]
+                    global_history = vals[:]     # iniciar acumulador
+                    send_telegram_text("✅ Histórico inicial carregado", throttle_seconds=0)
+                    found = True
                     break
-                time.sleep(5)
-            time.sleep(10)
+                time.sleep(2)
+            if not found:
+                send_telegram_text("⚠️ Histórico inicial não detectado (seguindo no loop)", throttle_seconds=0)
 
-            # ================= LOOP PRINCIPAL (a cada 10s) =================
+            # ============ LOOP PRINCIPAL ============
             while True:
+                # heartbeat: enviar a cada HEARTBEAT_INTERVAL (opcional)
+                now = time.time()
+                if now - last_heartbeat > HEARTBEAT_INTERVAL:
+                    send_telegram_text("💓 Heartbeat: scraper rodando", throttle_seconds=0)
+                    last_heartbeat = now
+
                 if page_shows_rate_limit(driver):
                     sleep_time = min(max_backoff, backoff) + random.uniform(0, 3)
-                    send_telegram_text(f"Rate limit detectado no loop — dormindo {int(sleep_time)}s")
+                    send_telegram_text(f"⚠️ Rate limit detectado — dormindo {int(sleep_time)}s", throttle_seconds=0)
                     time.sleep(sleep_time)
                     continue
 
                 novos = coletar_historico_dom(driver)
-
-                # DETECTA NOVO VALOR E ATUALIZA ACUMULADOR DE 50
                 if novos and (not historico or novos[0] != historico[0]):
                     added = False
+                    # inserir novos não duplicados no topo
                     for v in novos:
                         if v not in global_history:
-                            global_history.insert(0, v)   # novo no topo
+                            global_history.insert(0, v)
                             added = True
+                    # manter apenas 50
                     if len(global_history) > 50:
-                        global_history = global_history[:50]   # elimina o mais antigo
-
+                        global_history = global_history[:50]
                     if added:
                         lista = ", ".join(f"{v:.2f}x" for v in global_history[:25])
                         send_telegram_text(
-                            f"📊 **BETPAWA AVIATOR - ÚLTIMOS 50**\n\n[{lista}]\n\nÚltimo: *{global_history[0]:.2f}x*"
+                            f"📊 **BETPAWA AVIATOR - ÚLTIMOS {len(global_history)}**\n\n[{lista}]\n\nÚltimo: *{global_history[0]:.2f}x*",
+                            throttle_seconds=6,
                         )
-                        if random.random() < 0.6:
+                        # screenshot ocasional
+                        if random.random() < 0.45:
                             screenshot_and_send(driver, f"Histórico atualizado ({len(global_history)}/50)")
+                    historico = novos[:]
 
-                    historico = novos[:]   # atualiza snapshot
+                # --------------------------------------------------
+                # REMOVED: envio de "Aguardando 10s para próxima verificação..."
+                # Não enviar esse tipo de mensagem repetitiva para evitar flood.
+                # --------------------------------------------------
 
-                send_telegram_text("⏱️ Aguardando 10s para próxima verificação...")
                 time.sleep(10)
 
         except Exception as e:
+            # mensagem de erro com throttle zero (queremos ser notificados)
+            send_telegram_text(f"🔥 ERRO SCRAPER: {type(e).__name__} - {e}", throttle_seconds=0)
+            traceback.print_exc()
             sleep_time = min(max_backoff, backoff) + random.uniform(1, 4)
-            send_telegram_text(f"ERRO: {type(e).__name__} → reiniciando em {int(sleep_time)}s")
             time.sleep(sleep_time)
             backoff = min(max_backoff, backoff * 2)
 
@@ -271,14 +313,14 @@ def iniciar_scraper():
             if driver:
                 try:
                     driver.quit()
-                except:
+                except Exception:
                     pass
             time.sleep(5)
 
 
 @app.route("/api/history")
 def api_history():
-    return jsonify(global_history)   # ← agora retorna os últimos 50 acumulados
+    return jsonify(global_history)
 
 
 @app.route("/api/last")
