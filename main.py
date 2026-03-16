@@ -1,4 +1,6 @@
-# main.py (versão corrigida para evitar spam Telegram)
+#!/usr/bin/env python3
+# main.py — BETPAWA Aviator scraper (robusto, stealth, backoff, telegram throttle)
+
 import os
 import time
 import threading
@@ -36,11 +38,11 @@ def send_telegram_text(msg, throttle_seconds=6):
     """
     Envia texto ao Telegram com throttle customizável por chamada.
     throttle_seconds=0 => sem throttle (tentar enviar imediatamente).
+    Retorna True se enviar com sucesso, False caso throttled ou falha.
     """
     global _last_telegram
     now = time.time()
     if throttle_seconds and (now - _last_telegram) < throttle_seconds:
-        # não envia (throttled)
         return False
     try:
         requests.post(
@@ -104,6 +106,7 @@ def js_set_value_and_dispatch(driver, element, value):
             try{el.setAttribute('value',val);}catch(e){}
             try{el.dispatchEvent(new Event('input',{bubbles:true}));}catch(e){}
             try{el.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}
+            try{el.blur();}catch(e){}
             return true;
         """, element, value)
         return True
@@ -131,80 +134,138 @@ def coletar_historico_dom(driver):
 
 def page_shows_rate_limit(driver):
     try:
-        return any(token in driver.page_source.lower() for token in ["rate limit", "too many requests", "429"])
+        body = driver.page_source.lower()
+        # tokens comuns
+        return any(token in body for token in ["rate limit", "too many requests", "429", "rate-limited", "rate_limited", "too many requests"])
     except Exception:
         return False
 
 
+# ---------- START DRIVER ----------
+def start_driver():
+    """
+    Inicia o Chrome/Chromium com flags 'stealth' e injeta script via CDP para reduzir fingerprint.
+    """
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1366,768")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-popup-blocking")
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    )
+
+    if os.path.exists("/usr/bin/chromium"):
+        chrome_options.binary_location = "/usr/bin/chromium"
+
+    service = Service("/usr/bin/chromedriver") if os.path.exists("/usr/bin/chromedriver") else Service()
+
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        stealth_script = r"""
+        // basic stealth: remove webdriver and normalize some fingerprint values
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        try { Object.defineProperty(navigator, 'languages', {get: () => ['pt-BR','pt']}); } catch(e){}
+        try { Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4]}); } catch(e){}
+        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if(originalQuery){
+            try{
+                window.navigator.permissions.query = (parameters)=> {
+                    if(parameters && parameters.name === 'notifications'){
+                        return Promise.resolve({ state: Notification.permission });
+                    }
+                    return originalQuery(parameters);
+                };
+            }catch(e){}
+        }
+        try{
+            window.navigator.__defineGetter__('userAgent', function(){
+                return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36';
+            });
+        }catch(e){}
+        """
+        # addScriptToEvaluateOnNewDocument may fail depending on driver — ignore if so
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_script})
+    except Exception:
+        pass
+
+    # small settle
+    time.sleep(0.4)
+    return driver
+# ---------- END START DRIVER ----------
+
+
+# ---------- INICIAR SCRAPER ----------
 def iniciar_scraper():
     global historico, global_history
-    backoff = 8
-    max_backoff = 600
+    base_backoff = 8       # segundos iniciais
+    max_backoff = 600      # 10 minutos
+    backoff = base_backoff
+    consecutive_rate_limits = 0
+    RATE_LIMIT_RESET_AFTER = 6   # reinicia driver se ocorrer X rate limits consec
+    # adaptive polling parameters (more conservative than before)
+    MIN_POLL = 8
+    MAX_POLL = 18
+    SCREENSHOT_PROB = 0.25
+
+    HEARTBEAT_INTERVAL = 30 * 60  # opcional: 30 minutos
+
     last_heartbeat = 0
-    HEARTBEAT_INTERVAL = 30 * 60  # 30 minutos (apenas se quiser heartbeat)
 
     while True:
         driver = None
         try:
             send_telegram_text("🟢 Iniciando BETPAWA Aviator (modo protegido)", throttle_seconds=0)
-            time.sleep(5 + random.uniform(0, 5))
+            time.sleep(3 + random.uniform(1, 5))
 
-            opts = Options()
-            # Usa headless se a variável de ambiente pedir (ou sempre no container)
-            opts.add_argument("--headless=new")
-            opts.add_argument("--no-sandbox")
-            opts.add_argument("--disable-dev-shm-usage")
-            opts.add_argument("--disable-gpu")
-            opts.add_argument("--window-size=1366,768")
-            opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-            if os.path.exists("/usr/bin/chromium"):
-                opts.binary_location = "/usr/bin/chromium"
-            service = Service("/usr/bin/chromedriver") if os.path.exists("/usr/bin/chromedriver") else Service()
-
-            driver = webdriver.Chrome(service=service, options=opts)
+            driver = start_driver()
             wait = WebDriverWait(driver, 30)
 
-            # PASSO 1
+            # abrir URL
             send_telegram_text("📍 Abrindo URL do Betpawa", throttle_seconds=0)
             driver.get(URL)
-            time.sleep(6)
-            screenshot_and_send(driver, "1 - Página inicial aberta")
+            time.sleep(6 + random.uniform(0.5, 3.0))
+            screenshot_and_send(driver, "Página inicial aberta")
 
-            # PASSO 2 - login modal
+            # modal login: tentar abrir
             try:
                 login_btn = wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//button[@data-test-id='confirmation-modal-secondary-button' and contains(.,'Login')]")))
+                    (By.XPATH, "//button[@data-test-id='confirmation-modal-secondary-button' and contains(.,'Login')]")),)
                 safe_click(driver, login_btn)
-                send_telegram_text("✅ Modal de Login aberto", throttle_seconds=0)
+                time.sleep(1 + random.random()*1.8)
             except Exception:
-                # modal pode já estar aberto — não enviar spam
+                # modal pode já estar aberto; não é fatal
                 pass
-            time.sleep(4)
-            screenshot_and_send(driver, "2 - Após Login modal")
 
-            # PASSO 3 - telefone
+            # preencher telefone
             try:
-                phone = wait.until(EC.presence_of_element_located((By.ID, "phoneNumber")))
+                phone = wait.until(EC.presence_of_element_located((By.ID, "phoneNumber")), timeout=8)
                 js_set_value_and_dispatch(driver, phone, PHONE)
                 send_telegram_text("✅ Telefone preenchido", throttle_seconds=0)
             except Exception:
-                send_telegram_text("⚠️ Falha ao localizar/preencher telefone", throttle_seconds=0)
-            time.sleep(4)
-            screenshot_and_send(driver, "3 - Telefone OK")
+                send_telegram_text("⚠️ Não encontrei input de telefone", throttle_seconds=0)
 
-            # PASSO 4 - pin
+            time.sleep(0.8 + random.random()*1.6)
+
+            # preencher PIN
             try:
                 pin = wait.until(EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "input[data-test-id='loginFormPasswordInput'], input[type='password']")))
+                    (By.CSS_SELECTOR, "input[data-test-id='loginFormPasswordInput'], input[type='password']")), timeout=8)
                 js_set_value_and_dispatch(driver, pin, PIN)
                 send_telegram_text("✅ PIN preenchido", throttle_seconds=0)
             except Exception:
-                send_telegram_text("⚠️ Falha ao localizar/preencher PIN", throttle_seconds=0)
-            time.sleep(4)
-            screenshot_and_send(driver, "4 - PIN OK")
+                send_telegram_text("⚠️ Não encontrei input de PIN", throttle_seconds=0)
 
-            # PASSO 5 - submit login
+            time.sleep(0.6 + random.random()*1.2)
+
+            # submeter login
             try:
                 submit = driver.find_element(By.CSS_SELECTOR, "button[data-test-id='logInButton']")
                 if submit.get_attribute("disabled"):
@@ -212,112 +273,145 @@ def iniciar_scraper():
                 safe_click(driver, submit)
                 send_telegram_text("✅ Login enviado", throttle_seconds=0)
             except Exception:
-                send_telegram_text("⚠️ Falha ao enviar Login (submit não encontrado)", throttle_seconds=0)
-            time.sleep(6)
-            screenshot_and_send(driver, "5 - Login enviado")
+                send_telegram_text("⚠️ Falha ao enviar login (submit não encontrado)", throttle_seconds=0)
 
-            # PASSO 6 - localizar iframe do jogo
+            time.sleep(4 + random.uniform(1, 3))
+            screenshot_and_send(driver, "Login enviado / aguardando iframe")
+
+            # localizar iframe do jogo
             iframe_el = None
             start = time.time()
-            while time.time() - start < 40:
+            while time.time() - start < 45:
                 try:
-                    for f in driver.find_elements(By.TAG_NAME, "iframe"):
-                        src = (f.get_attribute("src") or "").lower()
-                        if "launch.spribegaming.com" in src or "aviator-next.spribegaming.com" in src or "spribegaming" in src:
-                            iframe_el = f
-                            break
+                    frames = driver.find_elements(By.TAG_NAME, "iframe")
+                    for f in frames:
+                        try:
+                            src = (f.get_attribute("src") or "").lower()
+                            if "spribegaming" in src or "aviator" in src or "launch.spribe" in src:
+                                iframe_el = f
+                                break
+                        except Exception:
+                            continue
                     if iframe_el:
                         break
                 except Exception:
                     pass
-                time.sleep(1)
-            if not iframe_el:
-                raise RuntimeError("iframe do jogo não encontrado")
-            driver.switch_to.frame(iframe_el)
-            send_telegram_text("✅ Dentro do iframe do Aviator", throttle_seconds=0)
-            time.sleep(4)
-            screenshot_and_send(driver, "6 - Dentro do Aviator")
+                time.sleep(1 + random.random()*0.6)
 
-            # PASSO 7 - histórico inicial
+            if not iframe_el:
+                raise RuntimeError("iframe do jogo não encontrado (timeout)")
+
+            # trocar para iframe
+            try:
+                driver.switch_to.frame(iframe_el)
+            except Exception:
+                # cross-origin ou outra proteção — reiniciar
+                raise RuntimeError("Falha ao trocar para iframe (possível cross-origin)")
+
+            send_telegram_text("✅ Dentro do iframe do Aviator", throttle_seconds=0)
+            time.sleep(2 + random.random()*2)
+            screenshot_and_send(driver, "Dentro do Aviator")
+
+            # histórico inicial
             start = time.time()
             found = False
-            while time.time() - start < 40:
+            while time.time() - start < 45:
                 if page_shows_rate_limit(driver):
-                    sleep_time = min(max_backoff, backoff) + random.uniform(0, 3)
+                    consecutive_rate_limits += 1
+                    sleep_time = min(max_backoff, backoff) + random.uniform(0.5, 2.0)
                     send_telegram_text(f"⚠️ Rate limit detectado — dormindo {int(sleep_time)}s", throttle_seconds=0)
                     time.sleep(sleep_time)
+                    backoff = min(max_backoff, backoff * 2)
                     continue
                 vals = coletar_historico_dom(driver)
                 if vals:
                     historico = vals[:]
-                    global_history = vals[:]     # iniciar acumulador
+                    global_history = vals[:]  # inicia acumulador
                     send_telegram_text("✅ Histórico inicial carregado", throttle_seconds=0)
                     found = True
+                    backoff = base_backoff = 8
+                    consecutive_rate_limits = 0
                     break
-                time.sleep(2)
+                time.sleep(2 + random.random()*0.8)
             if not found:
-                send_telegram_text("⚠️ Histórico inicial não detectado (seguindo no loop)", throttle_seconds=0)
+                send_telegram_text("⚠️ Histórico inicial não detectado — seguindo no loop", throttle_seconds=0)
 
-            # ============ LOOP PRINCIPAL ============
+            # loop principal (adaptive polling)
             while True:
-                # heartbeat: enviar a cada HEARTBEAT_INTERVAL (opcional)
+                # heartbeat opcional
                 now = time.time()
                 if now - last_heartbeat > HEARTBEAT_INTERVAL:
                     send_telegram_text("💓 Heartbeat: scraper rodando", throttle_seconds=0)
                     last_heartbeat = now
 
                 if page_shows_rate_limit(driver):
-                    sleep_time = min(max_backoff, backoff) + random.uniform(0, 3)
+                    consecutive_rate_limits += 1
+                    sleep_time = min(max_backoff, backoff) + random.uniform(1.0, 4.0)
                     send_telegram_text(f"⚠️ Rate limit detectado — dormindo {int(sleep_time)}s", throttle_seconds=0)
                     time.sleep(sleep_time)
+                    backoff = min(max_backoff, backoff * 2)
+                    if consecutive_rate_limits >= RATE_LIMIT_RESET_AFTER:
+                        send_telegram_text("🔄 Muitos rate-limits consecutivos — reiniciando driver", throttle_seconds=0)
+                        raise RuntimeError("Rate limit persistente - reiniciar driver")
                     continue
 
-                novos = coletar_historico_dom(driver)
+                try:
+                    novos = coletar_historico_dom(driver)
+                except WebDriverException:
+                    raise RuntimeError("WebDriverException durante coleta (reiniciar driver)")
+
                 if novos and (not historico or novos[0] != historico[0]):
                     added = False
-                    # inserir novos não duplicados no topo
                     for v in novos:
                         if v not in global_history:
                             global_history.insert(0, v)
                             added = True
-                    # manter apenas 50
                     if len(global_history) > 50:
                         global_history = global_history[:50]
                     if added:
                         lista = ", ".join(f"{v:.2f}x" for v in global_history[:25])
                         send_telegram_text(
-                            f"📊 **BETPAWA AVIATOR - ÚLTIMOS {len(global_history)}**\n\n[{lista}]\n\nÚltimo: *{global_history[0]:.2f}x*",
-                            throttle_seconds=6,
+                            f"📊 BETPAWA AVIATOR — ÚLTIMOS {len(global_history)}\n[{lista}]\nÚltimo: *{global_history[0]:.2f}x*",
+                            throttle_seconds=6
                         )
-                        # screenshot ocasional
-                        if random.random() < 0.45:
+                        if random.random() < SCREENSHOT_PROB:
                             screenshot_and_send(driver, f"Histórico atualizado ({len(global_history)}/50)")
                     historico = novos[:]
+                    # reduza backoff após sucesso
+                    backoff = base_backoff
+                    consecutive_rate_limits = 0
 
-                # --------------------------------------------------
-                # REMOVED: envio de "Aguardando 10s para próxima verificação..."
-                # Não enviar esse tipo de mensagem repetitiva para evitar flood.
-                # --------------------------------------------------
-
-                time.sleep(10)
+                # adaptive sleep
+                poll = MIN_POLL + random.uniform(0, MAX_POLL - MIN_POLL)
+                if consecutive_rate_limits > 0:
+                    poll = min(MAX_POLL, poll + consecutive_rate_limits * 4)
+                time.sleep(poll)
 
         except Exception as e:
-            # mensagem de erro com throttle zero (queremos ser notificados)
             send_telegram_text(f"🔥 ERRO SCRAPER: {type(e).__name__} - {e}", throttle_seconds=0)
             traceback.print_exc()
-            sleep_time = min(max_backoff, backoff) + random.uniform(1, 4)
+            try:
+                if driver:
+                    driver.quit()
+            except Exception:
+                pass
+            # escalate backoff and sleep
+            backoff = min(max_backoff, backoff * 2) if 'backoff' in locals() else base_backoff
+            sleep_time = min(max_backoff, backoff) + random.uniform(2, 6)
             time.sleep(sleep_time)
-            backoff = min(max_backoff, backoff * 2)
+            consecutive_rate_limits = 0
 
         finally:
-            if driver:
-                try:
+            try:
+                if driver:
                     driver.quit()
-                except Exception:
-                    pass
-            time.sleep(5)
+            except Exception:
+                pass
+            time.sleep(3)
+# ---------- END INICIAR SCRAPER ----------
 
 
+# Flask routes
 @app.route("/api/history")
 def api_history():
     return jsonify(global_history)
@@ -334,6 +428,8 @@ def home():
 
 
 if __name__ == "__main__":
+    # Inicia scraper em thread background e serve Flask
     threading.Thread(target=iniciar_scraper, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
+    # Permitir que Flask escute em todas as interfaces (container)
     app.run(host="0.0.0.0", port=port)
