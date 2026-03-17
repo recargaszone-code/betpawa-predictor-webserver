@@ -366,7 +366,7 @@ def run_flow_human_like():
                 vals = coletar_historico_from_frame(driver)
                 if vals:
                     with _history_lock:
-                        global_history = vals[:50]
+                        global_history = vals[:30]
                     found = True
                     send_telegram_text(f"✅ Histórico inicial detectado ({len(global_history)} valores)", throttle_seconds=0)
                     break
